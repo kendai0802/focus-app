@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>集中力検知システム</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <style>
+    body { background-color: #111; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+    .container { position: relative; width: 640px; height: 480px; background: #000; border: 2px solid #333; border-radius: 8px; overflow: hidden; }
+    video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); } /* 鏡のように反転 */
+    canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+    .status-panel { margin-top: 20px; padding: 20px; background: #222; border-radius: 8px; width: 640px; box-sizing: border-box; }
+    .alert-box { display: none; margin-bottom: 15px; padding: 15px; background-color: #ff4444; color: white; font-weight: bold; text-align: center; border-radius: 4px; animation: pulse 1s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+    .data-row { display: flex; justify-content: space-between; margin-bottom: 5px; font-family: monospace; font-size: 1.1em; }
+    button { background: #0066cc; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 4px; cursor: pointer; width: 100%; margin-top: 10px; }
+    button:hover { background: #0055aa; }
+    .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 20px; color: #888; }
+  </style>
+</head>
+<body>
+
+  <h1>集中力モニター (Web版)</h1>
+
+  <div class="container">
+    <div class="loading" id="loadingMsg">カメラ起動中...</div>
+    <video id="input_video" playsinline></video>
+    <canvas id="output_canvas"></canvas>
+    <div id="alertBox" class="alert-box">⚠️ 集中低下検知！</div>
+  </div>
+
+  <div class="status-panel">
+    <div class="data-row"><span>状態:</span> <span id="statusText">初期化中...</span></div>
+    <hr style="border-color: #444;">
+    <div class="data-row"><span>姿勢(Roll):</span> <span id="val-roll">0.0</span>°</div>
+    <div class="data-row"><span>左右(Yaw):</span> <span id="val-yaw">0.0</span></div>
+    <div class="data-row"><span>上下(Pitch):</span> <span id="val-pitch">0.0</span></div>
+    <div class="data-row"><span>目の開き(EAR):</span> <span id="val-ear">0.0</span></div>
+    <button onclick="calibrate()">現在の姿勢を「集中状態」として登録</button>
+  </div>
+
+  <script>
+    // --- 変数定義 ---
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    
+    let baseline = null; // 基準値
+
+    // --- 計算ロジック (React版と同じ) ---
+    function getDistance(p1, p2) {
+      return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+    }
+
+    function calculateData(landmarks) {
+      // 目の開き (EAR)
+      const leftEyeH = getDistance(landmarks[33], landmarks[133]);
+      const leftEyeV = (getDistance(landmarks[160], landmarks[144]) + getDistance(landmarks[158], landmarks[153])) / 2;
+      const leftEAR = leftEyeV / leftEyeH;
+      const rightEyeH = getDistance(landmarks[362], landmarks[263]);
+      const rightEyeV = (getDistance(landmarks[385], landmarks[380]) + getDistance(landmarks[387], landmarks[373])) / 2;
+      const rightEAR = rightEyeV / rightEyeH;
+      const ear = (leftEAR + rightEAR) / 2;
+
+      // 姿勢 (簡易計算)
+      const leftEyeCenter = landmarks[33];
+      const rightEyeCenter = landmarks[263];
+      const dx = rightEyeCenter.x - leftEyeCenter.x;
+      const dy = rightEyeCenter.y - leftEyeCenter.y;
+      const roll = Math.atan2(dy, dx) * (180 / Math.PI);
+
+      const nose = landmarks[1];
+      const leftFace = landmarks[234];
+      const rightFace = landmarks[454];
+      const faceWidth = getDistance(leftFace, rightFace);
+      const noseDist = getDistance(leftFace, nose);
+      const yaw = ((noseDist / faceWidth) - 0.5) * 200;
+
+      const chin = landmarks[152];
+      const forehead = landmarks[10];
+      const faceHeight = getDistance(forehead, chin);
+      const noseY = getDistance(forehead, nose);
+      const pitch = ((noseY / faceHeight) - 0.5) * 200;
+
+      return { roll, yaw, pitch, ear };
+    }
+
+    // --- メイン処理 ---
+    function onResults(results) {
+      document.getElementById('loadingMsg').style.display = 'none';
+
+      // 描画準備
+      canvasElement.width = videoElement.videoWidth;
+      canvasElement.height = videoElement.videoHeight;
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      
+      // 画像描画（なくてもいいが確認用）
+      // canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+        const landmarks = results.multiFaceLandmarks[0];
+
+        // 顔の点を描画（緑色）
+        canvasCtx.fillStyle = '#00FF00';
+        for (let i = 0; i < landmarks.length; i+=10) { // 全部描くと重いので間引く
+          const x = landmarks[i].x * canvasElement.width;
+          const y = landmarks[i].y * canvasElement.height;
+          canvasCtx.beginPath();
+          canvasCtx.arc(x, y, 2, 0, 2 * Math.PI);
+          canvasCtx.fill();
+        }
+
+        // データ計算
+        const data = calculateData(landmarks);
+        
+        // 画面表示更新
+        document.getElementById('val-roll').innerText = data.roll.toFixed(1);
+        document.getElementById('val-yaw').innerText = data.yaw.toFixed(1);
+        document.getElementById('val-pitch').innerText = data.pitch.toFixed(1);
+        document.getElementById('val-ear').innerText = data.ear.toFixed(3);
+
+        // 判定
+        if (baseline) {
+          checkConcentration(data);
+        } else {
+          document.getElementById('statusText').innerText = "キャリブレーション待ち";
+          document.getElementById('statusText').style.color = "yellow";
+        }
+        
+        // グローバル変数に保存（キャリブレーション用）
+        window.currentFaceData = data;
+      }
+      canvasCtx.restore();
+    }
+
+    // --- 集中判定 ---
+    function checkConcentration(current) {
+      const thresholds = { roll: 10, yaw: 20, pitch: 20, ear: 0.04 };
+      
+      const diffRoll = Math.abs(current.roll - baseline.roll);
+      const diffYaw = Math.abs(current.yaw - baseline.yaw);
+      const diffPitch = Math.abs(current.pitch - baseline.pitch);
+      const diffEAR = baseline.ear - current.ear;
+
+      let alerts = [];
+      if (diffRoll > thresholds.roll) alerts.push("姿勢");
+      if (diffYaw > thresholds.yaw) alerts.push("よそ見");
+      if (diffPitch > thresholds.pitch) alerts.push("うつむき");
+      if (diffEAR > thresholds.ear) alerts.push("眠気");
+
+      const alertBox = document.getElementById('alertBox');
+      const statusText = document.getElementById('statusText');
+
+      if (alerts.length > 0) {
+        alertBox.style.display = 'block';
+        alertBox.innerText = "⚠️ 集中低下: " + alerts.join(", ");
+        statusText.innerText = "集中低下検知！";
+        statusText.style.color = "red";
+      } else {
+        alertBox.style.display = 'none';
+        statusText.innerText = "集中しています";
+        statusText.style.color = "#00FF00";
+      }
+    }
+
+    // --- キャリブレーション ---
+    function calibrate() {
+      if (window.currentFaceData) {
+        baseline = window.currentFaceData;
+        alert("現在の姿勢を基準に設定しました！");
+      } else {
+        alert("顔が認識されていません");
+      }
+    }
+
+    // --- 初期化 ---
+    const faceMesh = new FaceMesh({locateFile: (file) => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+    }});
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+    faceMesh.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await faceMesh.send({image: videoElement});
+      },
+      width: 640,
+      height: 480
+    });
+    camera.start();
+  </script>
+</body>
+</html>

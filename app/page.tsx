@@ -7,7 +7,7 @@ export default function StandardFocusMonitor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // 状態管理
+  //状態管理
   const [isLoaded, setIsLoaded] = useState(false);
   const [status, setStatus] = useState('システム起動中...');
   const [data, setData] = useState({ roll: 0, yaw: 0, pitch: 0, ear: 0 });

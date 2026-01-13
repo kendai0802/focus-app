@@ -11,7 +11,7 @@ export default function FocusModeApp() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   
-  // 状態: 'LOADING' | 'FOCUSED' | 'SLEEPING' | 'NO_FACE'
+  // 状態:'LOADING' | 'FOCUSED' | 'SLEEPING' | 'NO_FACE'
   const [status, setStatus] = useState('LOADING'); 
   const [showCamera, setShowCamera] = useState(false);
   const [currentEar, setCurrentEar] = useState(0);

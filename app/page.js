@@ -3,39 +3,40 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import Script from 'next/script';
 
-// 初期設定
-const DEFAULT_THRESHOLD = 0.22; // EAR（目の開き）の基準
-const HISTORY_SIZE = 10;        // スムージング用
+// ★ 設定: 何ミリ秒よそ見したら「非集中」にするか（5秒 = 5000）
+const TIME_TO_TRIGGER_SLEEP = 5000;
+const HISTORY_SIZE = 10;
+const DEFAULT_THRESHOLD = 0.22;
 
 export default function FocusModeApp() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   
-  // 状態:'LOADING' | 'FOCUSED' | 'SLEEPING' | 'NO_FACE'
   const [status, setStatus] = useState('LOADING'); 
   const [showCamera, setShowCamera] = useState(false);
   const [currentEar, setCurrentEar] = useState(0);
+  
+  // ★ パネルの開閉状態管理
+  const [isSettingsOpen, setIsSettingsOpen] = useState(true);
 
-  // カメラ表示状態を同期するためのRef（バグ修正用）
+  // ★ 5秒カウント用: よそ見を開始した時刻を記録
+  const outOfFocusStartTimeRef = useRef(null);
+
   const showCameraRef = useRef(false);
   
-  // 設定値
   const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD);
   const thresholdRef = useRef(DEFAULT_THRESHOLD);
 
   const earHistory = useRef([]);
 
-  // showCameraの変更をRefに即座に反映
   useEffect(() => {
     showCameraRef.current = showCamera;
   }, [showCamera]);
 
-  // --- 計算ロジック ---
   const getDistance = (p1, p2) => {
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
   };
 
-  // 目の開き具合 (EAR) の計算
   const calculateEAR = (landmarks) => {
     const getEyeEAR = (p1, p2, p3, p4, p5, p6) => {
       const v1 = getDistance(landmarks[p2], landmarks[p6]);
@@ -48,21 +49,27 @@ export default function FocusModeApp() {
     return (leftEAR + rightEAR) / 2.0;
   };
 
-  // 判定処理
   const processFrame = useCallback((landmarks) => {
     const rawEAR = calculateEAR(landmarks);
 
-    // EARのスムージング（移動平均）
     earHistory.current.push(rawEAR);
     if (earHistory.current.length > HISTORY_SIZE) earHistory.current.shift();
     const smoothEAR = earHistory.current.reduce((a, b) => a + b, 0) / earHistory.current.length;
     
     setCurrentEar(smoothEAR);
 
-    // ★ 判定ロジック（シンプル版） ★
+    // ★ 判定ロジック（5秒ルール適用） ★
     if (smoothEAR < thresholdRef.current) {
-        setStatus('SLEEPING');
+        if (outOfFocusStartTimeRef.current === null) {
+            outOfFocusStartTimeRef.current = Date.now();
+        } else {
+            const elapsed = Date.now() - outOfFocusStartTimeRef.current;
+            if (elapsed > TIME_TO_TRIGGER_SLEEP) {
+                setStatus('SLEEPING');
+            }
+        }
     } else {
+        outOfFocusStartTimeRef.current = null;
         setStatus('FOCUSED');
     }
   }, []);
@@ -71,6 +78,16 @@ export default function FocusModeApp() {
     const newVal = parseFloat(e.target.value);
     setThreshold(newVal);          
     thresholdRef.current = newVal; 
+  };
+
+  // ★ 自動キャリブレーション機能 ★
+  const calibrateThreshold = () => {
+    if (currentEar > 0) {
+        const recommended = Math.max(0.15, currentEar - 0.04); 
+        setThreshold(recommended);
+        thresholdRef.current = recommended;
+        alert(`現在の目の開き(${currentEar.toFixed(3)})に合わせて\n閾値を ${recommended.toFixed(3)} に設定しました！`);
+    }
   };
 
   const startProcessing = async () => {
@@ -91,7 +108,6 @@ export default function FocusModeApp() {
       const canvas = canvasRef.current;
       const video = videoRef.current;
       
-      // カメラ映像の描画（Refを使って最新状態を確認）
       if (canvas && video && showCameraRef.current) {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
@@ -102,8 +118,6 @@ export default function FocusModeApp() {
           
           if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
               const landmarks = results.multiFaceLandmarks[0];
-              
-              // 目の点のみ描画
               ctx.fillStyle = '#00FF00';
               [33, 133, 362, 263].forEach(id => {
                   const p = landmarks[id];
@@ -117,6 +131,7 @@ export default function FocusModeApp() {
         processFrame(results.multiFaceLandmarks[0]);
       } else {
         setStatus('NO_FACE');
+        outOfFocusStartTimeRef.current = null;
         earHistory.current = [];
       }
     });
@@ -158,7 +173,6 @@ export default function FocusModeApp() {
 
         {/* 状態表示UI */}
         <div className={`absolute inset-0 flex flex-col items-center justify-center z-20 transition-opacity duration-300 ${showCamera ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
-            
             {status === 'LOADING' ? (
                 <div className="text-gray-400 animate-pulse">システム準備中...</div>
             ) : (
@@ -185,31 +199,67 @@ export default function FocusModeApp() {
                             {status === 'SLEEPING' && '非集中'}
                             {status === 'NO_FACE' && '顔なし'}
                         </div>
-                        
-                        <div className="text-[10px] text-gray-400 mt-2 font-mono flex flex-col items-center">
-                           <span>EAR: {currentEar.toFixed(3)}</span>
-                        </div>
                     </div>
                 </div>
             )}
         </div>
       </div>
 
-      <div className="fixed bottom-8 flex flex-col gap-4 bg-white/90 backdrop-blur px-6 py-4 rounded-2xl shadow-lg border border-gray-200 z-50 w-80">
-          <div className="flex flex-col gap-2">
-              <div className="flex justify-between text-xs text-gray-500 font-bold">
-                  <span>反応しにくい</span>
-                  <span>閾値: {threshold.toFixed(2)}</span>
-                  <span>厳しい</span>
-              </div>
-              <input type="range" min="0.15" max="0.30" step="0.01" value={threshold} onChange={handleThresholdChange} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-green-500" />
-              <div className="text-[10px] text-gray-400 text-center">右にするほど、少し目を細めただけで「居眠り」になります</div>
-          </div>
-          <div className="w-full h-px bg-gray-200"></div>
-          <button onClick={() => setShowCamera(!showCamera)} className="flex items-center justify-center gap-2 text-sm text-gray-700 hover:text-black font-medium">
-            {showCamera ? '映像を隠す' : '映像で目を確認'}
-          </button>
-      </div>
+      {/* コントロールパネルの表示切り替え */}
+      {isSettingsOpen ? (
+        /* 開いている時 */
+        <div className="fixed bottom-8 flex flex-col gap-4 bg-white/95 backdrop-blur px-6 py-6 rounded-2xl shadow-xl border border-gray-200 z-50 w-96 animate-in slide-in-from-bottom-5 fade-in duration-300">
+            
+            {/* ★ 閉じるボタン (×) */}
+            <button 
+                onClick={() => setIsSettingsOpen(false)}
+                className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full w-8 h-8 flex items-center justify-center transition-colors"
+                aria-label="閉じる"
+            >
+                ✕
+            </button>
+
+            {/* ★ 視覚ゲージ */}
+            <div className="w-full h-4 bg-gray-200 rounded-full overflow-hidden relative mt-2">
+                <div className="absolute top-0 bottom-0 w-1 bg-red-500 z-10 shadow-[0_0_8px_rgba(239,68,68,0.8)]" style={{ left: `${(threshold / 0.4) * 100}%` }}></div>
+                <div className={`absolute top-0 bottom-0 left-0 transition-all duration-300 ${currentEar < threshold ? 'bg-red-300' : 'bg-green-500'}`} style={{ width: `${(currentEar / 0.4) * 100}%` }}></div>
+            </div>
+            <div className="flex justify-between text-[10px] text-gray-500 font-mono">
+               <span>閉 (0.0)</span>
+               <span>現在: {currentEar.toFixed(3)}</span>
+               <span>開 (0.4)</span>
+            </div>
+
+            <div className="flex flex-col gap-3">
+                <div className="flex justify-between items-center text-xs text-gray-500 font-bold">
+                    <span>閾値: {threshold.toFixed(2)}</span>
+                    <button 
+                      onClick={calibrateThreshold}
+                      className="px-3 py-1.5 bg-blue-500 text-white rounded-md text-xs hover:bg-blue-600 transition-colors shadow-sm font-bold"
+                    >
+                      今の目で自動設定
+                    </button>
+                </div>
+                <input type="range" min="0.10" max="0.35" step="0.01" value={threshold} onChange={handleThresholdChange} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-green-500" />
+                <div className="text-[10px] text-gray-400 text-center leading-tight">
+                    赤い線より緑のバーが左に行き、<br/>5秒経過すると「非集中」になります。
+                </div>
+            </div>
+            
+            <div className="w-full h-px bg-gray-200 my-1"></div>
+            <button onClick={() => setShowCamera(!showCamera)} className="flex items-center justify-center gap-2 text-sm text-gray-700 hover:text-black font-medium py-2 rounded-lg hover:bg-gray-50 transition-colors">
+              {showCamera ? '📷 映像を隠す' : '📷 映像で目を確認'}
+            </button>
+        </div>
+      ) : (
+        /* 閉じている時：設定を開くボタン */
+        <button 
+            onClick={() => setIsSettingsOpen(true)}
+            className="fixed bottom-8 bg-white/90 backdrop-blur px-6 py-3 rounded-full shadow-lg border border-gray-200 text-gray-700 font-bold hover:bg-gray-50 hover:scale-105 transition-all z-50 flex items-center gap-2"
+        >
+            ⚙ 設定
+        </button>
+      )}
     </div>
   );
 }
